@@ -38,10 +38,13 @@ def pyrefly_facts(srcdir, outdir, only=None):
     """Write one JSON fact file per source file, owned by a unit named after it."""
     outdir.mkdir(parents=True, exist_ok=True)
     counts = {}
+    # With `only`, Pyrefly is given just those files to check. It still reads
+    # the other files when it resolves their imports.
+    targets = ["./**/*.py"] if only is None else sorted("./" + f for f in only)
     with tempfile.TemporaryDirectory() as tmp:
         subprocess.run(
             ["pyrefly", "check", "--check-all", f"--report-glean={tmp}/output",
-             "--output-format=omit-errors", "--summary=none", "./**/*.py",
+             "--output-format=omit-errors", "--summary=none", *targets,
              "--search-path=."], cwd=srcdir, check=False)
         for f in sorted(pathlib.Path(tmp, "output").glob("*.json")):
             batches = json.loads(f.read_text())
@@ -120,6 +123,86 @@ def definitions(db, srcdir, files=None):
     return defs
 
 
+COMPARED = ["python.CalleeToCaller", "python.DefinitionLocation",
+            "python.DeclarationLocation", "python.FileCall",
+            "python.XRefsViaNameByFile", "src.File"]
+
+
+def strip_ids(v):
+    if isinstance(v, dict):
+        return {k: strip_ids(x) for k, x in v.items() if k != "id"}
+    if isinstance(v, list):
+        return [strip_ids(x) for x in v]
+    return v
+
+
+def fact_set(db, predicate):
+    return {json.dumps(strip_ids(r["key"]), sort_keys=True)
+            for r in query(db, predicate + " _")}
+
+
+def call_pairs(facts):
+    out = []
+    for f in sorted(facts):
+        k = json.loads(f)
+        out.append(f'{k["caller"]["key"]} calls {k["callee"]["key"]}')
+    return out
+
+
+def compare_with_full_index(name, db, new_dir):
+    """Index the changed directory from scratch and compare what the two
+    databases answer, by content (names, relations, locations), not fact ids."""
+    full = f"ex/{name}_full"
+    glean("create", "--db", full)
+    write_db(full, new_dir, ROOT / "facts" / (name + "_full"))
+    glean("complete", "--db", full)
+    glean("finish", "--db", full)
+    result = {}
+    for pred in COMPARED:
+        inc, ful = fact_set(db, pred), fact_set(full, pred)
+        row = dict(incremental=len(inc), full=len(ful), same=inc == ful)
+        if pred == "python.CalleeToCaller" and inc != ful:
+            row["only_in_incremental"] = call_pairs(inc - ful)
+            row["only_in_full"] = call_pairs(ful - inc)
+        result[pred] = row
+    return result
+
+
+def run_main_function(srcdir):
+    p = subprocess.run([sys.executable, "-c", "import main; print(main.main_function())"],
+                       cwd=srcdir, capture_output=True, text=True)
+    return p.stdout.strip() or p.stderr.strip().splitlines()[-1]
+
+
+def review_sentences(name, flagged, edited):
+    """Join the caller query to the saved sentences. The verdicts are written
+    by hand in example/descriptions/sentences.json; nothing here judges text."""
+    data = json.loads((ROOT / "example" / "descriptions" / "sentences.json").read_text())
+    why = {}
+    for f in flagged:
+        if f["caller_file"] and not f["caller_file_edited"]:
+            why.setdefault(f["caller"], []).append(f["changed_definition"])
+    rows = []
+    for s in data["sentences"]:
+        v = s["verdict_after"][name]
+        rows.append(dict(id=s["id"], file=s["file"], heading=s["heading"], about=s["about"],
+                         text=s["text"], file_edited=s["file"] in edited,
+                         selected_because_it_calls=why.get(s["about"], []),
+                         still_correct=v["still_correct"], reason=v["reason"]))
+    unedited = [r for r in rows if not r["file_edited"]]
+    sel = [r for r in unedited if r["selected_because_it_calls"]]
+    summary = dict(
+        sentences_in_unedited_files=len(unedited),
+        selected=len(sel),
+        selected_and_now_wrong=[r["id"] for r in sel if not r["still_correct"]],
+        selected_and_still_correct=[r["id"] for r in sel if r["still_correct"]],
+        not_selected_but_now_wrong=[r["id"] for r in unedited
+                                    if not r["selected_because_it_calls"] and not r["still_correct"]],
+        in_edited_files_and_now_wrong=[r["id"] for r in rows
+                                       if r["file_edited"] and not r["still_correct"]])
+    return dict(summary=summary, sentences=rows)
+
+
 def scenario(name, base_dir, new_dir, base_db):
     old_files = {p.name for p in base_dir.glob("*.py")}
     new_files = {p.name for p in new_dir.glob("*.py")}
@@ -167,7 +250,12 @@ def scenario(name, base_dir, new_dir, base_db):
                 changed_definitions=changed, removed_definitions=removed,
                 added_definitions=added, callers_of_changed_or_removed=flagged,
                 unedited_files_whose_description_needs_rereading=reread,
-                unedited_files_not_flagged=[f for f in unedited if f not in reread])
+                unedited_files_not_flagged=[f for f in unedited if f not in reread],
+                main_function_output=dict(before=run_main_function(base_dir),
+                                          after=run_main_function(new_dir)),
+                saved_sentences=review_sentences(name, flagged, edited)
+                if name.startswith("variant_") else None,
+                incremental_compared_with_full_index=compare_with_full_index(name, db, new_dir))
 
 
 def main():
@@ -180,7 +268,8 @@ def main():
         glean("complete", "--db", "ex/base")
         glean("finish", "--db", "ex/base")
         results = [scenario(n, base_dir, ROOT / "example" / n, "ex/base")
-                   for n in ("variant_callee_only", "branch_v2")]
+                   for n in ("variant_callee_only", "variant_docstring_only",
+                             "variant_reexport", "variant_caller_edited", "branch_v2")]
         report = dict(base_facts=base_counts,
                       predicates_dropped_for_this_glean_schema=sorted(DROPPED),
                       scenarios=results)

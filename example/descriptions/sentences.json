@@ -1,0 +1,84 @@
+{
+  "note": "Constructed for this test. These sentences were written for branch_v1 under CodeMap's file-description headings to show the mechanism. They are not descriptions found stale in a real project's history. Each verdict was reached by reading the changed code; the verdicts for main_function are also backed by the executed outputs the runner records.",
+  "written_for": "example/branch_v1",
+  "sentences": [
+    {
+      "id": "main-1",
+      "file": "main.py",
+      "heading": "INTERFACE",
+      "about": "main.main_function",
+      "text": "main_function(): returns twice the value stored in HelperClass.",
+      "verdict_after": {
+        "variant_callee_only": {"still_correct": false, "reason": "calculate_result now multiplies by three, so main_function returns 126 for the stored value 42, which is three times it."},
+        "variant_docstring_only": {"still_correct": true, "reason": "Only a docstring changed; main_function still returns 84."},
+        "variant_reexport": {"still_correct": false, "reason": "The calculate_result that main.py imports is now lib's, which multiplies by three."},
+        "variant_caller_edited": {"still_correct": false, "reason": "main.py itself was edited: main_function now returns the stored value unchanged. Updating this sentence was part of that edit."}
+      }
+    },
+    {
+      "id": "main-2",
+      "file": "main.py",
+      "heading": "FLOW",
+      "about": "main.main_function",
+      "text": "main_function reads the value from a HelperClass and passes it to calculate_result.",
+      "verdict_after": {
+        "variant_callee_only": {"still_correct": true, "reason": "The call is unchanged; only the multiplier inside calculate_result differs."},
+        "variant_docstring_only": {"still_correct": true, "reason": "Only a docstring changed."},
+        "variant_reexport": {"still_correct": true, "reason": "main_function still calls the name calculate_result imported from utils."},
+        "variant_caller_edited": {"still_correct": false, "reason": "main.py itself was edited: the call was removed."}
+      }
+    },
+    {
+      "id": "main-3",
+      "file": "main.py",
+      "heading": "DEPENDENCIES",
+      "about": "main.main_function",
+      "text": "Couples: calculate_result is defined in utils.py.",
+      "verdict_after": {
+        "variant_callee_only": {"still_correct": true, "reason": "calculate_result is still defined in utils.py."},
+        "variant_docstring_only": {"still_correct": true, "reason": "Only a docstring changed."},
+        "variant_reexport": {"still_correct": false, "reason": "calculate_result is now defined in lib.py and only re-exported by utils.py."},
+        "variant_caller_edited": {"still_correct": true, "reason": "utils.py is unchanged."}
+      }
+    },
+    {
+      "id": "main-4",
+      "file": "main.py",
+      "heading": "INTERFACE",
+      "about": "main.MainClass.process",
+      "text": "MainClass.process(): returns helper_function()'s string followed by the helper's stored value.",
+      "verdict_after": {
+        "variant_callee_only": {"still_correct": true, "reason": "process does not call calculate_result."},
+        "variant_docstring_only": {"still_correct": true, "reason": "Only a docstring changed."},
+        "variant_reexport": {"still_correct": true, "reason": "helper_function and get_value are unchanged."},
+        "variant_caller_edited": {"still_correct": true, "reason": "process was not changed."}
+      }
+    },
+    {
+      "id": "lib-1",
+      "file": "lib.py",
+      "heading": "INTERFACE",
+      "about": "lib.HelperClass.get_value",
+      "text": "HelperClass.get_value(): returns the stored value, which starts at 42.",
+      "verdict_after": {
+        "variant_callee_only": {"still_correct": true, "reason": "lib.py is unchanged and calls nothing in utils.py."},
+        "variant_docstring_only": {"still_correct": true, "reason": "lib.py is unchanged."},
+        "variant_reexport": {"still_correct": true, "reason": "lib.py was edited, but get_value was not."},
+        "variant_caller_edited": {"still_correct": true, "reason": "lib.py is unchanged."}
+      }
+    },
+    {
+      "id": "utils-1",
+      "file": "utils.py",
+      "heading": "INTERFACE",
+      "about": "utils.calculate_result",
+      "text": "calculate_result(value): returns value multiplied by two.",
+      "verdict_after": {
+        "variant_callee_only": {"still_correct": false, "reason": "utils.py itself was edited: the multiplier is now three. Updating this sentence was part of that edit."},
+        "variant_docstring_only": {"still_correct": true, "reason": "Only a docstring changed."},
+        "variant_reexport": {"still_correct": false, "reason": "utils.py itself was edited: calculate_result is now lib's and multiplies by three."},
+        "variant_caller_edited": {"still_correct": true, "reason": "utils.py is unchanged."}
+      }
+    }
+  ]
+}
