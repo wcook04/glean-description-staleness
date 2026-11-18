@@ -1,77 +1,118 @@
 # glean-description-staleness
 
-After a commit, [Glean](https://glean.software)'s caller links select the saved descriptions in unedited files that need rereading. In the example here, changing one multiplier in `utils.py` selects three saved sentences about `main.py`, which was left unedited. One of them, "returns twice the value stored in HelperClass", is now false: the function returns 126 for a stored 42.
+When a function is edited, a sentence describing one of its callers can become false even though the caller's file was not edited. This repository uses [Glean](https://glean.software) to find those callers. After a change, a script asks Glean which functions call each changed function, and lists the saved sentences about those callers so that a person knows which ones to reread.
 
-A description of a file can go wrong when a function it calls changes, even if the file itself was left alone. Glean records who calls what and can update that per commit, so a caller query can choose where to look. Reading the selected sentence is still what decides whether it is wrong.
+It runs on the three-file Python example from Glean's own tests. In one test a single function is edited so that it multiplies by three instead of two. Glean returns its one caller, which is in a file that was not edited. Three sentences had been saved about that caller, and one of them, "returns twice the value stored in HelperClass", is now false.
 
-## What runs
+## What a saved description is
 
-`scripts/run.py` does the following for a base directory and a changed directory of Python files.
+I ask coding agents to write a few sentences about each file, under fixed headings in the file's docstring, while they still have the context from writing the code. When an agent edits a file it updates that file's sentences. It does not update the sentences in other files, and those are the ones this test is about.
 
-1. [Pyrefly](https://pyrefly.org) writes Glean facts for the base. Each source file is one ownership unit.
-2. `glean create`, `write`, `complete` and `finish` build a base database.
-3. `glean create --incremental <base> --exclude <edited files>` builds an incremental database, and facts for the edited files are written into it. Pyrefly is given only the edited files to check; it still reads the others to resolve imports.
-4. Each definition in an edited file is compared, old text against new text. Nested definitions are blanked out first, so a class counts as changed only when its own lines changed.
-5. For each changed or removed definition, the incremental database is queried with `python.CalleeToCaller { callee = "<name>" }`.
-6. Saved sentences about a caller in an unedited file are selected for rereading.
-7. The changed directory is also indexed from scratch, and the answers of the two databases are compared by content for six predicates.
-
-The workflow in `.github/workflows/run.yml` runs this on GitHub Actions with the published image `ghcr.io/facebookincubator/glean/demo:latest` and Pyrefly 1.4.1. The databases live inside the job and are discarded afterwards. The full output is the `out/report.json` artifact of each run.
+For this test the sentences are in `example/descriptions/sentences.json`. There are six, written for the first version of the example under three of the headings (`INTERFACE`, `FLOW`, `DEPENDENCIES`). Each one has a hand-written verdict, true or false, for each change below. They were written to show the mechanism. They do not come from a real project's history.
 
 ## The example
 
-`example/branch_v1` and `example/branch_v2` are copied from Glean's tests (`glean/lang/codemarkup/tests/python/branches_cases`, licence in `example/LICENSE-Glean`). Each has `main.py`, `lib.py` and `utils.py`.
+`example/branch_v1` and `example/branch_v2` are copied from `glean/lang/codemarkup/tests/python/branches_cases` in Glean (licence in `example/LICENSE-Glean`). Each has three files.
 
-Four variants of `branch_v1` were made for this test. Each differs from it only as stated.
+- `lib.py` defines `HelperClass`, which stores the value 42, and `helper_function`.
+- `utils.py` defines `calculate_result(value)`, which returns `value * 2`.
+- `main.py` imports from both. Its `main_function` reads the value from a `HelperClass` and passes it to `calculate_result`, so it returns 84.
 
-| Variant | What differs from `branch_v1` |
+In `branch_v2` all three files are edited, so it has no unedited file to test. I made four smaller changes to `branch_v1`, each in its own directory.
+
+| Directory | The change |
 |---|---|
-| `variant_callee_only` | `utils.calculate_result` returns `value * 3` where it returned `value * 2`. |
-| `variant_docstring_only` | Only the docstring of `utils.calculate_result`. |
-| `variant_reexport` | `calculate_result` moves to `lib.py` (multiplying by three) and `utils.py` re-exports it. `main.py` still imports it from `utils`. |
-| `variant_caller_edited` | `main.main_function` no longer calls `calculate_result`. |
+| `variant_callee_only` | `calculate_result` returns `value * 3`. |
+| `variant_docstring_only` | Only the docstring of `calculate_result` is edited. |
+| `variant_reexport` | `calculate_result` is moved into `lib.py`, where it returns `value * 3`, and `utils.py` now contains `from lib import calculate_result`. `main.py` is not edited and still imports it from `utils`. |
+| `variant_caller_edited` | `main_function` no longer calls `calculate_result`. |
 
-`example/descriptions/sentences.json` holds six sentences written for `branch_v1` under the headings CodeMap uses for file descriptions (`INTERFACE`, `FLOW`, `DEPENDENCIES`). They were constructed for this test, and each carries a hand-written verdict for each variant. They are an illustration of the mechanism. They were not found stale in a real project's history.
+## What the script does
 
-## Result
+`scripts/run.py` runs these steps. Every `glean` command below also takes `--db-root` and `--schema`, left out here to keep the lines short.
 
-Sentences in unedited files, per variant:
+1. **Index the first version.** [Pyrefly](https://pyrefly.org) writes Glean facts as JSON, one file of facts per source file. The script adds `"unit": "<source file name>"` to every batch, so each source file is one ownership unit. Then:
 
-| Variant | Files edited | Caller Glean returned | Sentences selected | Selected and now false | Selected and still true | False but left unselected |
-|---|---|---|---|---|---|---|
-| `variant_callee_only` | `utils.py` | `main.main_function` | 3 of 5 | 1 | 2 | 0 |
-| `variant_docstring_only` | `utils.py` | `main.main_function` | 3 of 5 | 0 | 3 | 0 |
-| `variant_reexport` | `utils.py`, `lib.py` | `main.main_function` | 3 of 4 | 2 | 1 | 0 |
-| `variant_caller_edited` | `main.py` | none | 0 of 2 | 0 | 0 | 0 |
+   ```
+   glean create --db ex/base
+   glean write --db ex/base facts/base/*.json
+   glean complete --db ex/base
+   glean finish --db ex/base
+   ```
 
-The three selected sentences are the ones about `main.main_function`. For `variant_callee_only`:
+2. **Index a change incrementally.** The edited files are the ones whose bytes differ from the first version. Pyrefly is run on those files only (it still reads the others to resolve imports), and their facts are written into a new database on top of the base:
+
+   ```
+   glean create --db ex/variant_callee_only --incremental ex/base --exclude utils.py
+   glean write --db ex/variant_callee_only facts/variant_callee_only/utils.py.json
+   glean complete --db ex/variant_callee_only
+   glean finish --db ex/variant_callee_only
+   ```
+
+3. **Find the definitions whose text changed.** `python.DefinitionLocation { file = "utils.py" }` is queried on both databases, which gives the span of each function, class and module-level variable. The script compares the source text in each span, old against new. Nested definitions are blanked out first, so a class counts as changed only when its own lines changed.
+
+4. **Ask for the callers.** For each changed or removed definition the incremental database is queried with `python.CalleeToCaller { callee = "utils.calculate_result" }`. Pyrefly writes these caller facts itself, in the batch for the caller's file. No `glean derive` step is run.
+
+5. **List the sentences.** If a returned caller is in a file that was not edited, the saved sentences about that caller are listed for rereading.
+
+6. **Compare with a full index.** The changed directory is also indexed from scratch into a third database. The facts in the incremental database and the full one are compared by content, ignoring fact ids, for `python.CalleeToCaller`, `python.DefinitionLocation`, `python.DeclarationLocation`, `python.FileCall`, `python.XRefsViaNameByFile` and `src.File`.
+
+## Results
+
+### One function edited (`variant_callee_only`)
+
+Only `utils.py` is edited. Glean returns one caller of `utils.calculate_result`, which is `main.main_function`, from the facts for `main.py` that are still in the base database. `main_function` returned 84 before the change and returns 126 after it.
+
+Three saved sentences are about `main_function`:
 
 | Saved sentence | After the change |
 |---|---|
-| "main_function(): returns twice the value stored in HelperClass." | False. It returned 84 before and returns 126 after, for a stored 42. |
+| "main_function(): returns twice the value stored in HelperClass." | False. It returns three times the value. |
 | "main_function reads the value from a HelperClass and passes it to calculate_result." | Still true. |
 | "Couples: calculate_result is defined in utils.py." | Still true. |
 
-All three share one call relationship. Which of them is false depends on their wording, so the query chooses where to read and a reader decides.
+All three sentences are about the same call, so the caller query lists all three. Finding the false one still takes reading them. The two sentences that are not listed, one about another function in `main.py` and one about `lib.py`, are both still true.
 
-The docstring-only variant selects the same three sentences and none is false, because step 4 compares definition text.
+### Only a docstring edited (`variant_docstring_only`)
 
-### Incremental database compared with a fresh full index
+The same three sentences are listed and all three are still true. Step 3 compares the whole text of a definition, including its docstring, so this edit counts as a change.
 
-| Variant | Same answers for all six predicates |
-|---|---|
-| `variant_callee_only` | yes |
-| `variant_docstring_only` | yes |
-| `variant_caller_edited` | yes |
-| `branch_v2` | yes |
-| `variant_reexport` | no |
+### A function moved to another file (`variant_reexport`)
 
-In `variant_reexport` the fresh index contains `main.main_function calls lib.calculate_result`. The incremental database lacks it, because `main.py` was unedited and its facts were kept from the base, where the import resolved to `utils.calculate_result`. The file was still selected here, through the removed definition `utils.calculate_result`. A later change to `lib.calculate_result` would miss it. Choosing which unedited files to index again after a change like this is outside what this script does.
+In this case the incremental database ends up missing a caller fact that a full index has.
 
-## Limits
+`utils.py` and `lib.py` are edited and `main.py` is not. The three sentences about `main_function` are still listed, because `utils.calculate_result` no longer exists as a definition and the facts for `main.py`, kept from the base, still have `main_function` as its caller. Two of the three sentences are now false.
 
-- The example has three files and the sentences were constructed for it. Nothing here measures how often selected descriptions are false, or how many false ones go unselected, on a real codebase.
-- The selection covers sentences in unedited files. Sentences in an edited file are expected to be updated with that edit, and this test does not check that they were.
-- Only direct callers are queried. Callers of callers are not followed, and neither are dependencies on constants, types or data formats.
-- An unselected sentence has only been passed over by this rule. It has not been checked.
-- The published Glean image dates from June 2024. Its Python schema does not define two predicates that Pyrefly 1.4.1 writes, `python.XRefsViaNameByTarget` and `python.xrefs.XRefsByFile`. The script leaves those two out. `python.CalleeToCaller` is unaffected.
+The full index contains the fact that `main.main_function` calls `lib.calculate_result`. The incremental database does not. `main.py` was not edited, so its facts were not written again, but the function its import resolves to has changed. If `lib.calculate_result` were edited next, a caller query on this database would return no caller in `main.py`.
+
+The script indexes only the edited files again. It has no step that finds unedited files whose facts need writing again because a file they import from was edited.
+
+### The caller itself edited (`variant_caller_edited`)
+
+Only `main.py` is edited, and no sentence in an unedited file is listed. The sentences about `main_function` are in the edited file. The agent that edits `main.py` is expected to update them, and the script does not examine whether it did.
+
+### Counts
+
+Sentences in unedited files, for each change:
+
+| Change | Listed for rereading | Listed and now false | Listed and still true | False and not listed |
+|---|---|---|---|---|
+| `variant_callee_only` | 3 of 5 | 1 | 2 | 0 |
+| `variant_docstring_only` | 3 of 5 | 0 | 3 | 0 |
+| `variant_reexport` | 3 of 4 | 2 | 1 | 0 |
+| `variant_caller_edited` | 0 of 2 | 0 | 0 | 0 |
+
+For `variant_callee_only`, `variant_docstring_only`, `variant_caller_edited` and `branch_v2`, the incremental database and the full index contain the same facts for all six predicates. For `variant_reexport` they differ as described above.
+
+## What this does not show
+
+- The example has three files and six sentences written for it. It gives no rate for how often a listed sentence is false in a real codebase, or for how many false sentences go unlisted.
+- Only direct callers are queried. A sentence can also depend on a function several calls away, or on a constant, a type or a data format, and none of those are followed.
+- No program or person has examined a sentence that is not listed.
+- Sentences in an edited file are left to the agent that made the edit.
+
+## Running it
+
+`.github/workflows/run.yml` runs the script on every push, on a GitHub Actions `ubuntu-latest` runner. It uses the published image `ghcr.io/facebookincubator/glean/demo:latest` and Pyrefly 1.4.1. The databases are created inside the container and discarded when the job ends. The full output of each run is the `out/report.json` artifact, and `out/glean_commands.log` has every Glean command with its output.
+
+The published image was built in June 2024. Its Python schema does not define two predicates that Pyrefly 1.4.1 writes, `python.XRefsViaNameByTarget` and `python.xrefs.XRefsByFile`, so the script leaves those two out before writing. `python.CalleeToCaller` is in that schema.
