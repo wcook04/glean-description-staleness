@@ -139,6 +139,15 @@ def scenario(name, base_dir, new_dir, base_db):
     removed = sorted(n for n in old if n not in new)
     added = sorted(n for n in new if n not in old)
 
+    # Check that the excluded units' old facts are hidden in the incremental
+    # database: each edited file should show only its newly written rows.
+    rows = {f: dict(base=len(query(base_db, 'python.DefinitionLocation { file = "%s" }' % f)),
+                    incremental=len(query(db, 'python.DefinitionLocation { file = "%s" }' % f)),
+                    written=sum(len(b["facts"]) for b in json.loads(
+                        (ROOT / "facts" / name / (f + ".json")).read_text())
+                        if b["predicate"].startswith("python.DefinitionLocation")))
+            for f in edited if f in new_files}
+
     everything = definitions(db, new_dir)          # the view after the change
     flagged = []
     for callee in changed + removed:
@@ -154,6 +163,7 @@ def scenario(name, base_dir, new_dir, base_db):
                 changed_dir=str(new_dir.relative_to(ROOT)),
                 edited_files=edited, unedited_files=unedited,
                 facts_written_incrementally=counts,
+                definition_rows_in_edited_files=rows,
                 changed_definitions=changed, removed_definitions=removed,
                 added_definitions=added, callers_of_changed_or_removed=flagged,
                 unedited_files_whose_description_needs_rereading=reread,
