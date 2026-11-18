@@ -1,8 +1,8 @@
 # glean-description-staleness
 
-A small test of one question: after a commit, can [Glean](https://glean.software)'s caller links choose which saved file descriptions need rereading?
+After a commit, [Glean](https://glean.software)'s incremental index and caller links pick out the unedited files whose saved descriptions need rereading. In the example here, changing one function in `utils.py` marks `main.py`, which calls it, and leaves `lib.py` alone.
 
-A description of a file can go wrong when a function it calls changes, even if the file itself was left alone. This test uses Glean's incremental indexing to find those files.
+A description of a file can go wrong when a function it calls changes, even if the file itself was left alone. Glean already records who calls what and updates that per commit, so the same query selects the descriptions to check.
 
 ## What runs
 
