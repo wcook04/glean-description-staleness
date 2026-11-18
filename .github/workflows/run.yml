@@ -1,0 +1,36 @@
+name: run
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Pyrefly
+        run: pip install pyrefly==1.4.1
+      - name: Write facts with one unit per file
+        run: |
+          python3 scripts/make_facts.py example/branch_v1 facts/base
+          python3 scripts/make_facts.py example/variant_callee_only facts/variant --only utils.py
+      - name: Run Glean
+        run: |
+          docker run --rm -v "$PWD:/work" --entrypoint bash \
+            ghcr.io/facebookincubator/glean/demo:latest /work/scripts/glean_run.sh 2>&1 | tee glean.log
+      - name: Show outputs
+        if: always()
+        run: |
+          sudo chown -R "$USER" out || true
+          for f in out/*; do echo "=== $f"; head -c 6000 "$f"; echo; done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: out
+          path: |
+            out
+            facts
+            glean.log
