@@ -373,7 +373,7 @@ def scenario(name, base_dir, new_dir, base_db, mode, label=None):
     before = definitions(base_db, base_dir)       # the view before it
     flagged = {}
     for callee in changed + removed:
-        for label, d in (("before", base_db), ("after", db)):
+        for which, d in (("before", base_db), ("after", db)):
             for r in query(d, 'python.CalleeToCaller { callee = "%s" }' % callee):
                 caller = r["key"]["caller"]["key"]
                 where = after.get(caller) or before.get(caller) or {}
@@ -381,7 +381,7 @@ def scenario(name, base_dir, new_dir, base_db, mode, label=None):
                     changed_definition=callee, caller=caller,
                     caller_file=where.get("file"),
                     caller_file_edited=where.get("file") in edited, found_in=[]))
-                row["found_in"].append(label)
+                row["found_in"].append(which)
     flagged = [flagged[k] for k in sorted(flagged)]
     reread = sorted({f["caller_file"] for f in flagged
                      if f["caller_file"] and not f["caller_file_edited"]})

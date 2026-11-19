@@ -18,7 +18,7 @@ For this test the sentences are in `example/descriptions/sentences.json`. There 
 - `utils.py` defines `calculate_result(value)`, which returns `value * 2`.
 - `main.py` imports from both. Its `main_function` reads the value from a `HelperClass` and passes it to `calculate_result`, so it returns 84.
 
-In `branch_v2` all three files are edited, so it has no unedited file to test. I made four smaller changes to `branch_v1`, each in its own directory.
+In `branch_v2` all three files are edited, so it has no unedited file to test. I made four smaller changes to `branch_v1`, each in its own directory, and two more cases.
 
 | Directory | The change |
 |---|---|
@@ -26,6 +26,8 @@ In `branch_v2` all three files are edited, so it has no unedited file to test. I
 | `variant_docstring_only` | Only the docstring of `calculate_result` is edited. |
 | `variant_reexport` | `calculate_result` is moved into `lib.py`, where it returns `value * 3`, and `utils.py` now contains `from lib import calculate_result`. `main.py` is not edited and still imports it from `utils`. |
 | `variant_caller_edited` | `main_function` no longer calls `calculate_result`. |
+| `variant_reexport_then_x4` | A second change, made to `variant_reexport`: only `lib.calculate_result` is edited, to return `value * 4`. |
+| `chain_v1` → `chain_move` | A separate pair. In `chain_v1`, `main.py` imports everything from `utils`, which re-exports it from `lib`, so `main.py` imports nothing from `lib` directly. In `chain_move`, `calculate_result` moves from `lib.py` to a new `core.py` and `lib.py` re-exports it. `utils.py` and `main.py` are not edited. |
 
 ## What the script does
 
@@ -40,7 +42,12 @@ In `branch_v2` all three files are edited, so it has no unedited file to test. I
    glean finish --db ex/base
    ```
 
-2. **Index a change incrementally.** The edited files are the ones whose bytes differ from the first version. Pyrefly is run on those files only (it still reads the others to resolve imports), and their facts are written into a new database on top of the base:
+2. **Index a change incrementally.** The edited files are the ones whose bytes differ from the first version. The script keeps a second list, the files to index again, and runs each change in two ways:
+
+   - **edited files only**: the second list is the edited files;
+   - **with importers**: the second list also has every unedited file that imports an edited file, in the old or the new version, directly or through other files. The imports are read from the source with Python's `ast` module, which stands in here for the dependency list a build system would give. The two-hop case is also run with **direct importers** only.
+
+   Pyrefly is run on the files in the second list only (it still reads the others to resolve imports), and their units are excluded from the base. A Pyrefly run that fails, or that writes facts for fewer files than it was given, stops the script. For edited files only:
 
    ```
    glean create --db ex/variant_callee_only --incremental ex/base --exclude utils.py
@@ -51,11 +58,11 @@ In `branch_v2` all three files are edited, so it has no unedited file to test. I
 
 3. **Find the definitions whose text changed.** `python.DefinitionLocation { file = "utils.py" }` is queried on both databases, which gives the span of each function, class and module-level variable. The script compares the source text in each span, old against new. Nested definitions are blanked out first, so a class counts as changed only when its own lines changed.
 
-4. **Ask for the callers.** For each changed or removed definition the incremental database is queried with `python.CalleeToCaller { callee = "utils.calculate_result" }`. Pyrefly writes these caller facts itself, in the batch for the caller's file. No `glean derive` step is run.
+4. **Ask for the callers.** For each changed or removed definition the base and the incremental database are both queried with `python.CalleeToCaller { callee = "utils.calculate_result" }`. Pyrefly writes these caller facts itself, in the batch for the caller's file. No `glean derive` step is run.
 
-5. **List the sentences.** If a returned caller is in a file that was not edited, the saved sentences about that caller are listed for rereading.
+5. **List the sentences.** If a returned caller is in a file that was not edited, the saved sentences about that caller are listed for rereading. This uses the edited list, not the list of files indexed again.
 
-6. **Compare with a full index.** The changed directory is also indexed from scratch into a third database. The facts in the incremental database and the full one are compared by content, ignoring fact ids, for `python.CalleeToCaller`, `python.DefinitionLocation`, `python.DeclarationLocation`, `python.FileCall`, `python.XRefsViaNameByFile` and `src.File`.
+6. **Compare with a full index.** The changed directory is also indexed from scratch into a third database. The facts in the incremental database and the full one are compared by content, ignoring fact ids, for every predicate either one was given: fourteen, including `python.CalleeToCaller`, `python.XRefsViaNameByFile` and `python.NameToSName`.
 
 ## Results
 
@@ -85,7 +92,31 @@ In this case the incremental database ends up missing a caller fact that a full 
 
 The full index contains the fact that `main.main_function` calls `lib.calculate_result`. The incremental database does not. `main.py` was not edited, so its facts were not written again, but the function its import resolves to has changed. If `lib.calculate_result` were edited next, a caller query on this database would return no caller in `main.py`.
 
-The script indexes only the edited files again. It has no step that finds unedited files whose facts need writing again because a file they import from was edited.
+With edited files only, nothing finds unedited files whose facts need writing again because a file they import from was edited.
+
+With importers, `main.py` is indexed again because it imports `utils.py` and `lib.py`. The incremental database then has the same facts as the full index for all fourteen predicates, including the fact that `main.main_function` calls `lib.calculate_result`. The same three sentences are listed.
+
+### A second change on top of the move (`variant_reexport_then_x4`)
+
+Only `lib.py` is edited, and `main_function` now returns 168. The parent database is a full index of `variant_reexport`, which has the same facts as the repaired incremental database above.
+
+With edited files only, `main.py` keeps its facts from the parent and they still name `lib.calculate_result` as the function it calls. The incremental database has the same facts as a full index for all fourteen predicates, and the caller query lists the three sentences about `main_function`. So once the facts for `main.py` are right, a later change to the function's body does not need `main.py` indexed again, while its sentences still need rereading.
+
+`utils.py` was not edited either. Its sentence "calculate_result(value): returns value multiplied by two" is false, and was already false after the move. It is not listed: `utils.py` now only imports and re-exports the function, and an import is not a call, so the caller query does not return it.
+
+I first built this change on top of the repaired incremental database itself, as a second layer. `glean create --incremental` exited with an assertion in `glean/rts/ownership/slice.cpp` (``base.empty() || first >= base.end()``). The report keeps that run. This is the June 2024 image; I have not checked whether a newer Glean behaves differently.
+
+### Two imports away (`chain_move`)
+
+`core.py` is new and `lib.py` is edited. `utils.py` imports from `lib.py`, and `main.py` imports from `utils.py`.
+
+| Files indexed again | Same as full index | Caller facts for `main_function` |
+|---|---|---|
+| edited only: `core.py`, `lib.py` | No | still says it calls `lib.calculate_result`; the call to `core.calculate_result` is missing |
+| direct importers: adds `utils.py` | No | the same |
+| all importers: adds `utils.py` and `main.py` | Yes, all fourteen predicates | calls `core.calculate_result` |
+
+Here the database is wrong in both directions until `main.py` is indexed again: it keeps a call that no longer happens and lacks the one that does. Following imports one step is not enough.
 
 ### The caller itself edited (`variant_caller_edited`)
 
@@ -101,13 +132,18 @@ Sentences in unedited files, for each change:
 | `variant_docstring_only` | 3 of 5 | 0 | 3 | 0 |
 | `variant_reexport` | 3 of 4 | 2 | 1 | 0 |
 | `variant_caller_edited` | 0 of 2 | 0 | 0 | 0 |
+| `variant_reexport_then_x4` | 3 of 5 | 2 | 1 | 1 |
 
-For `variant_callee_only`, `variant_docstring_only`, `variant_caller_edited` and `branch_v2`, the incremental database and the full index contain the same facts for all six predicates. For `variant_reexport` they differ as described above.
+The counts are the same with edited files only and with importers.
+
+With importers, every case gives the same facts as the full index for all fourteen predicates. With edited files only, `variant_reexport` and `chain_move` differ, in `python.CalleeToCaller` and `python.XRefsViaNameByFile`; every other case matches.
 
 ## What this does not show
 
 - The example has three files and six sentences written for it. It gives no rate for how often a listed sentence is false in a real codebase, or for how many false sentences go unlisted.
-- Only direct callers are queried. A sentence can also depend on a function several calls away, or on a constant, a type or a data format, and none of those are followed.
+- The list of importers comes from reading `import` lines with Python's `ast` module on three or four files. A real project would take it from its build system or type checker, and would also need relative imports, search paths and modules that cannot be resolved handled. Indexing too many files again is safe; leaving one out is not.
+- With importers, every file that imports an edited file is indexed again, including after a change, such as `variant_callee_only`, where its facts would have stayed right. No smaller list is tried.
+- Only direct callers are queried, and an import or re-export is not a call. A sentence can also depend on a function several calls away, or on a constant, a type or a data format, and none of those are followed.
 - No program or person has examined a sentence that is not listed.
 - Sentences in an edited file are left to the agent that made the edit.
 
