@@ -294,30 +294,67 @@ def run_main_function(srcdir):
     return p.stdout.strip() or p.stderr.strip().splitlines()[-1]
 
 
-def review_sentences(name, flagged, edited):
-    """Join the caller query to the saved sentences. The verdicts are written
-    by hand in example/descriptions/sentences.json; nothing here judges text."""
-    data = json.loads((ROOT / "example" / "descriptions" / "sentences.json").read_text())
+def xref_hits(db, files, targets, defs):
+    """References in `files` whose target is one of `targets`, read from
+    python.XRefsViaNameByFile. Each hit names the innermost definition that
+    contains it, or None for module level (an import or re-export)."""
+    hits = []
+    for f in files:
+        for r in query(db, 'python.XRefsViaNameByFile { file = "%s" }' % f):
+            for x in r["key"]["xrefs"]:
+                target = x["target"]["key"]
+                if target not in targets:
+                    continue
+                at = x["source"]["start"]
+                inside = [(d["length"], n) for n, d in defs.items() if d["file"] == f
+                          and d["start"] <= at < d["start"] + d["length"]]
+                hits.append(dict(changed_definition=target, file=f, start=at,
+                                 inside=min(inside)[1] if inside else None))
+    return hits
+
+
+def review_sentences(name, flagged, hits, edited, defs, sentence_file="sentences.json"):
+    """Join the caller query and the reference query to the saved sentences.
+    The verdicts are written by hand in example/descriptions/; nothing here
+    judges text. A sentence is selected by callers when the definition it is
+    about calls a changed definition. It is selected by references when a
+    reference to a changed definition sits inside the definition it is about,
+    or at module level in its file when it is about a name that file does not
+    define (such as a re-export)."""
+    data = json.loads((ROOT / "example" / "descriptions" / sentence_file).read_text())
     why = {}
     for f in flagged:
         if f["caller_file"] and not f["caller_file_edited"]:
             why.setdefault(f["caller"], []).append(f["changed_definition"])
     rows = []
     for s in data["sentences"]:
+        if name not in s["verdict_after"]:
+            return None
         v = s["verdict_after"][name]
+        defined_here = s["about"] in defs and defs[s["about"]]["file"] == s["file"]
+        refs = sorted({h["changed_definition"] for h in hits if h["file"] == s["file"] and (
+            h["inside"] == s["about"] or (h["inside"] is None and not defined_here))})
         rows.append(dict(id=s["id"], file=s["file"], heading=s["heading"], about=s["about"],
                          text=s["text"], file_edited=s["file"] in edited,
                          selected_because_it_calls=why.get(s["about"], []),
+                         selected_because_it_references=refs,
                          still_correct=v["still_correct"], reason=v["reason"]))
     unedited = [r for r in rows if not r["file_edited"]]
-    sel = [r for r in unedited if r["selected_because_it_calls"]]
+
+    def count(pick):
+        sel = [r for r in unedited if pick(r)]
+        return dict(selected=len(sel),
+                    selected_and_now_wrong=[r["id"] for r in sel if not r["still_correct"]],
+                    selected_and_still_correct=[r["id"] for r in sel if r["still_correct"]],
+                    not_selected_but_now_wrong=[r["id"] for r in unedited
+                                                if not pick(r) and not r["still_correct"]])
+    by_calls = count(lambda r: r["selected_because_it_calls"])
     summary = dict(
+        sentence_file=sentence_file,
         sentences_in_unedited_files=len(unedited),
-        selected=len(sel),
-        selected_and_now_wrong=[r["id"] for r in sel if not r["still_correct"]],
-        selected_and_still_correct=[r["id"] for r in sel if r["still_correct"]],
-        not_selected_but_now_wrong=[r["id"] for r in unedited
-                                    if not r["selected_because_it_calls"] and not r["still_correct"]],
+        **by_calls,
+        callers_or_references=count(lambda r: r["selected_because_it_calls"]
+                                    or r["selected_because_it_references"]),
         in_edited_files_and_now_wrong=[r["id"] for r in rows
                                        if r["file_edited"] and not r["still_correct"]])
     return dict(summary=summary, sentences=rows)
@@ -383,6 +420,13 @@ def scenario(name, base_dir, new_dir, base_db, mode, label=None):
                     caller_file_edited=where.get("file") in edited, found_in=[]))
                 row["found_in"].append(which)
     flagged = [flagged[k] for k in sorted(flagged)]
+    targets = set(changed + removed)
+    hits = []
+    for which, d, defs_ in (("before", base_db, before), ("after", db, after)):
+        files = [f for f in unedited]
+        for h in xref_hits(d, files, targets, defs_):
+            h["found_in"] = which
+            hits.append(h)
     reread = sorted({f["caller_file"] for f in flagged
                      if f["caller_file"] and not f["caller_file_edited"]})
     sentences_name = name
@@ -400,7 +444,12 @@ def scenario(name, base_dir, new_dir, base_db, mode, label=None):
                 unedited_files_not_flagged=[f for f in unedited if f not in reread],
                 main_function_output=dict(before=run_main_function(base_dir),
                                           after=run_main_function(new_dir)),
-                saved_sentences=review_sentences(sentences_name, flagged, edited)
+                references_to_changed_or_removed_in_unedited_files=hits,
+                saved_sentences=review_sentences(sentences_name, flagged, hits, edited, after)
+                if name.startswith("variant_") else None,
+                saved_sentences_rewritten_after_reexport=review_sentences(
+                    sentences_name, flagged, hits, edited, after,
+                    "sentences_after_reexport.json")
                 if name.startswith("variant_") else None,
                 incremental_compared_with_full_index=compare_with_full_index(
                     name, db, new_dir, [ROOT / "facts" / "base", factdir]))
@@ -414,6 +463,8 @@ def summary_row(r):
     cmp = r["incremental_compared_with_full_index"]
     c2c = cmp["rows"].get("python.CalleeToCaller", {})
     s = r["saved_sentences"]["summary"] if r["saved_sentences"] else None
+    c = r["saved_sentences_rewritten_after_reexport"]
+    c = c["summary"] if c else None
     return dict(scenario=r["scenario"], mode=r["mode"], label=r["label"], parent_db=r["parent_db"],
                 edited=r["edited_files"], reindexed=r["reindexed_files"],
                 same_as_full_index=cmp["same_as_full_index"],
@@ -423,7 +474,13 @@ def summary_row(r):
                 reread=r["unedited_files_whose_description_needs_rereading"],
                 main_function=r["main_function_output"],
                 sentences_selected_and_now_wrong=s and s["selected_and_now_wrong"],
-                sentences_not_selected_but_now_wrong=s and s["not_selected_but_now_wrong"])
+                sentences_not_selected_but_now_wrong=s and s["not_selected_but_now_wrong"],
+                sentences_by_callers_or_references=s and s["callers_or_references"],
+                rewritten_sentences=c and dict(
+                    by_callers={k: c[k] for k in ("selected", "selected_and_now_wrong",
+                                                  "not_selected_but_now_wrong")},
+                    by_callers_or_references=c["callers_or_references"],
+                    in_edited_files_and_now_wrong=c["in_edited_files_and_now_wrong"]))
 
 
 def main():

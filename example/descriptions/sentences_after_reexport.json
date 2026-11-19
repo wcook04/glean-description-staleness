@@ -1,0 +1,76 @@
+{
+  "note": "Constructed for this test. These sentences were rewritten for variant_reexport so that every one is true for that version, and then judged after the next change, variant_reexport_then_x4, which edits only lib.calculate_result. They are not descriptions found stale in a real project's history. Each verdict was reached by reading the changed code; the verdicts for main_function are also backed by the executed outputs the runner records.",
+  "written_for": "example/variant_reexport",
+  "sentences": [
+    {
+      "id": "main-1",
+      "file": "main.py",
+      "heading": "INTERFACE",
+      "about": "main.main_function",
+      "text": "main_function(): returns three times the value stored in HelperClass.",
+      "verdict_after": {
+        "variant_reexport_then_x4": {"still_correct": false, "reason": "lib.calculate_result now multiplies by four, so main_function returns 168 for the stored value 42."}
+      }
+    },
+    {
+      "id": "main-2",
+      "file": "main.py",
+      "heading": "FLOW",
+      "about": "main.main_function",
+      "text": "main_function reads the value from a HelperClass and passes it to calculate_result.",
+      "verdict_after": {
+        "variant_reexport_then_x4": {"still_correct": true, "reason": "The call is unchanged; only the multiplier inside calculate_result differs."}
+      }
+    },
+    {
+      "id": "main-3",
+      "file": "main.py",
+      "heading": "DEPENDENCIES",
+      "about": "main.main_function",
+      "text": "Couples: calculate_result is defined in lib.py and imported through utils.py.",
+      "verdict_after": {
+        "variant_reexport_then_x4": {"still_correct": true, "reason": "calculate_result is still defined in lib.py and re-exported by utils.py."}
+      }
+    },
+    {
+      "id": "main-4",
+      "file": "main.py",
+      "heading": "INTERFACE",
+      "about": "main.MainClass.process",
+      "text": "MainClass.process(): returns helper_function()'s string followed by the helper's stored value.",
+      "verdict_after": {
+        "variant_reexport_then_x4": {"still_correct": true, "reason": "MainClass.process does not call calculate_result."}
+      }
+    },
+    {
+      "id": "lib-1",
+      "file": "lib.py",
+      "heading": "INTERFACE",
+      "about": "lib.HelperClass.get_value",
+      "text": "HelperClass.get_value(): returns the stored value, which starts at 42.",
+      "verdict_after": {
+        "variant_reexport_then_x4": {"still_correct": true, "reason": "HelperClass.get_value is unchanged."}
+      }
+    },
+    {
+      "id": "lib-2",
+      "file": "lib.py",
+      "heading": "INTERFACE",
+      "about": "lib.calculate_result",
+      "text": "calculate_result(value): returns value multiplied by three.",
+      "verdict_after": {
+        "variant_reexport_then_x4": {"still_correct": false, "reason": "lib.py itself was edited: calculate_result now multiplies by four. Updating this sentence was part of that edit."}
+      }
+    },
+    {
+      "id": "utils-1",
+      "file": "utils.py",
+      "heading": "INTERFACE",
+      "about": "utils.calculate_result",
+      "text": "Re-exports calculate_result from lib.py, which returns value multiplied by three.",
+      "verdict_after": {
+        "variant_reexport_then_x4": {"still_correct": false, "reason": "utils.py was not edited, but the function it re-exports now multiplies by four."}
+      }
+    }
+  ]
+}
