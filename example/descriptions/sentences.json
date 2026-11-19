@@ -12,7 +12,8 @@
         "variant_callee_only": {"still_correct": false, "reason": "calculate_result now multiplies by three, so main_function returns 126 for the stored value 42, which is three times it."},
         "variant_docstring_only": {"still_correct": true, "reason": "Only a docstring changed; main_function still returns 84."},
         "variant_reexport": {"still_correct": false, "reason": "The calculate_result that main.py imports is now lib's, which multiplies by three."},
-        "variant_caller_edited": {"still_correct": false, "reason": "main.py itself was edited: main_function now returns the stored value unchanged. Updating this sentence was part of that edit."}
+        "variant_caller_edited": {"still_correct": false, "reason": "main.py itself was edited: main_function now returns the stored value unchanged. Updating this sentence was part of that edit."},
+        "variant_reexport_then_x4": {"still_correct": false, "reason": "lib.calculate_result now multiplies by four, so main_function returns 168 for the stored value 42."}
       }
     },
     {
@@ -25,7 +26,8 @@
         "variant_callee_only": {"still_correct": true, "reason": "The call is unchanged; only the multiplier inside calculate_result differs."},
         "variant_docstring_only": {"still_correct": true, "reason": "Only a docstring changed."},
         "variant_reexport": {"still_correct": true, "reason": "main_function still calls the name calculate_result imported from utils."},
-        "variant_caller_edited": {"still_correct": false, "reason": "main.py itself was edited: the call was removed."}
+        "variant_caller_edited": {"still_correct": false, "reason": "main.py itself was edited: the call was removed."},
+        "variant_reexport_then_x4": {"still_correct": true, "reason": "main_function still reads the value from a HelperClass and passes it to calculate_result."}
       }
     },
     {
@@ -38,7 +40,8 @@
         "variant_callee_only": {"still_correct": true, "reason": "calculate_result is still defined in utils.py."},
         "variant_docstring_only": {"still_correct": true, "reason": "Only a docstring changed."},
         "variant_reexport": {"still_correct": false, "reason": "calculate_result is now defined in lib.py and only re-exported by utils.py."},
-        "variant_caller_edited": {"still_correct": true, "reason": "utils.py is unchanged."}
+        "variant_caller_edited": {"still_correct": true, "reason": "utils.py is unchanged."},
+        "variant_reexport_then_x4": {"still_correct": false, "reason": "calculate_result is defined in lib.py. This was already false after variant_reexport; the multiplier change does not alter it."}
       }
     },
     {
@@ -51,7 +54,8 @@
         "variant_callee_only": {"still_correct": true, "reason": "process does not call calculate_result."},
         "variant_docstring_only": {"still_correct": true, "reason": "Only a docstring changed."},
         "variant_reexport": {"still_correct": true, "reason": "helper_function and get_value are unchanged."},
-        "variant_caller_edited": {"still_correct": true, "reason": "process was not changed."}
+        "variant_caller_edited": {"still_correct": true, "reason": "process was not changed."},
+        "variant_reexport_then_x4": {"still_correct": true, "reason": "MainClass.process does not call calculate_result."}
       }
     },
     {
@@ -64,7 +68,8 @@
         "variant_callee_only": {"still_correct": true, "reason": "lib.py is unchanged and calls nothing in utils.py."},
         "variant_docstring_only": {"still_correct": true, "reason": "lib.py is unchanged."},
         "variant_reexport": {"still_correct": true, "reason": "lib.py was edited, but get_value was not."},
-        "variant_caller_edited": {"still_correct": true, "reason": "lib.py is unchanged."}
+        "variant_caller_edited": {"still_correct": true, "reason": "lib.py is unchanged."},
+        "variant_reexport_then_x4": {"still_correct": true, "reason": "HelperClass.get_value is unchanged."}
       }
     },
     {
@@ -77,7 +82,8 @@
         "variant_callee_only": {"still_correct": false, "reason": "utils.py itself was edited: the multiplier is now three. Updating this sentence was part of that edit."},
         "variant_docstring_only": {"still_correct": true, "reason": "Only a docstring changed."},
         "variant_reexport": {"still_correct": false, "reason": "utils.py itself was edited: calculate_result is now lib's and multiplies by three."},
-        "variant_caller_edited": {"still_correct": true, "reason": "utils.py is unchanged."}
+        "variant_caller_edited": {"still_correct": true, "reason": "utils.py is unchanged."},
+        "variant_reexport_then_x4": {"still_correct": false, "reason": "utils.calculate_result is lib's function, re-exported, and multiplies by four. It was already false after variant_reexport, where it multiplied by three."}
       }
     }
   ]

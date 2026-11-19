@@ -2,20 +2,33 @@
 """After a change, ask Glean which definitions call the changed ones, and list
 the files whose saved descriptions therefore need rereading.
 
-Steps, for a base directory and a changed directory of Python files:
-  1. Pyrefly writes Glean facts for the base; each source file is one unit.
-  2. Glean builds a base database from those facts.
-  3. Glean builds an incremental database on top: the changed files' units are
-     excluded and only those files are indexed again.
-  4. Definitions in the changed files are compared, old text against new text.
-  5. For each changed or removed definition, the incremental database is asked
-     for its callers (python.CalleeToCaller).
+Steps, for a parent directory and a changed directory of Python files:
+  1. Pyrefly writes Glean facts for the parent; each source file is one unit.
+  2. Glean builds a parent database from those facts.
+  3. Glean builds an incremental database on top. Two lists of files are kept
+     apart:
+       - edited: the files whose bytes changed;
+       - re-indexed: the files whose facts are written again.
+     In mode "edited_only" the two lists are the same. In mode "importers" the
+     re-indexed list also has every unedited file that imports an edited file,
+     directly or through other files, in either version, because its call and
+     reference facts can point at a definition that moved. Mode
+     "direct_importers" stops after one import, to show when that is not
+     enough. Every re-indexed file's unit is excluded from the parent.
+  4. Definitions in the edited files are compared, old text against new text.
+  5. For each changed or removed definition, both the parent and the new
+     database are asked for its callers (python.CalleeToCaller).
   6. Callers in files that were not edited are the descriptions to reread.
+     That uses the edited list, not the re-indexed one: a file can need
+     indexing again without its description needing rereading, and the
+     other way round.
+  7. The new database is compared with a fresh full index of the same files,
+     for every predicate either one holds.
 
 The glean binary runs in a container (GLEAN_CONTAINER); this script runs on the
 host and calls it with `docker exec`.
 """
-import json, os, pathlib, re, subprocess, sys, tempfile
+import ast, json, os, pathlib, re, subprocess, sys, tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CONTAINER = os.environ.get("GLEAN_CONTAINER", "glean")
@@ -34,6 +47,10 @@ def glean(*args, check=True):
     return p
 
 
+def py_files(srcdir):
+    return {str(q.relative_to(srcdir)) for q in pathlib.Path(srcdir).rglob("*.py")}
+
+
 def pyrefly_facts(srcdir, outdir, only=None):
     """Write one JSON fact file per source file, owned by a unit named after it."""
     outdir.mkdir(parents=True, exist_ok=True)
@@ -42,10 +59,13 @@ def pyrefly_facts(srcdir, outdir, only=None):
     # the other files when it resolves their imports.
     targets = ["./**/*.py"] if only is None else sorted("./" + f for f in only)
     with tempfile.TemporaryDirectory() as tmp:
-        subprocess.run(
+        p = subprocess.run(
             ["pyrefly", "check", "--check-all", f"--report-glean={tmp}/output",
              "--output-format=omit-errors", "--summary=none", *targets,
-             "--search-path=."], cwd=srcdir, check=False)
+             "--search-path=."], cwd=srcdir, capture_output=True, text=True)
+        if p.returncode != 0:
+            print(p.stdout[-4000:], p.stderr[-4000:])
+            sys.exit(f"pyrefly failed (exit {p.returncode}) in {srcdir}")
         for f in sorted(pathlib.Path(tmp, "output").glob("*.json")):
             batches = json.loads(f.read_text())
             src = next(b["facts"][0]["key"]["file"]["key"] for b in batches
@@ -56,6 +76,11 @@ def pyrefly_facts(srcdir, outdir, only=None):
                     if b.get("predicate") and b["facts"] and b["predicate"] not in DROPPED]
             (outdir / (src.replace("/", "__") + ".json")).write_text(json.dumps(kept))
             counts[src] = sum(len(b["facts"]) for b in kept)
+    # A run that wrote facts for only some of the files must not pass as an
+    # update: the missing files would silently keep their parent's facts.
+    wanted = set(only) if only is not None else py_files(srcdir)
+    if set(counts) != wanted:
+        sys.exit(f"pyrefly wrote facts for {sorted(counts)}, expected {sorted(wanted)}")
     return counts
 
 
@@ -123,9 +148,71 @@ def definitions(db, srcdir, files=None):
     return defs
 
 
-COMPARED = ["python.CalleeToCaller", "python.DefinitionLocation",
-            "python.DeclarationLocation", "python.FileCall",
-            "python.XRefsViaNameByFile", "src.File"]
+# ---------------------------------------------------------------- imports
+
+def local_imports(srcdir):
+    """file -> set of files in srcdir that it imports, read with Python's ast.
+    This stands in for a build system's dependency list on this fixture."""
+    srcdir = pathlib.Path(srcdir)
+    files = py_files(srcdir)
+
+    def module_file(mod):
+        base = mod.replace(".", "/")
+        for cand in (base + ".py", base + "/__init__.py"):
+            if cand in files:
+                return cand
+        return None
+
+    graph = {}
+    for f in sorted(files):
+        pkg = f.rsplit("/", 1)[0].replace("/", ".") if "/" in f else ""
+        deps = set()
+        for node in ast.walk(ast.parse((srcdir / f).read_text(), f)):
+            if isinstance(node, ast.Import):
+                mods = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                if node.level:
+                    parts = pkg.split(".") if pkg else []
+                    parts = parts[:len(parts) - (node.level - 1)] if node.level > 1 else parts
+                    head = ".".join(parts + ([node.module] if node.module else []))
+                else:
+                    head = node.module or ""
+                # `from pkg import sub` can name a module as well as a value.
+                mods = [head] + [f"{head}.{a.name}" if head else a.name for a in node.names]
+            else:
+                continue
+            for m in mods:
+                hit = module_file(m) if m else None
+                if hit and hit != f:
+                    deps.add(hit)
+        graph[f] = deps
+    return graph
+
+
+def importers_of(edited, old_dir, new_dir, transitive=True):
+    """Unedited files that import an edited file, in the old or the new
+    version, directly or (if transitive) through other files."""
+    reverse = {}
+    for d in (old_dir, new_dir):
+        for f, deps in local_imports(d).items():
+            for dep in deps:
+                reverse.setdefault(dep, set()).add(f)
+    seen, todo = set(), list(edited)
+    while todo:
+        f = todo.pop()
+        for imp in reverse.get(f, ()):
+            if imp not in seen and imp not in edited:
+                seen.add(imp)
+                if transitive:
+                    todo.append(imp)
+    return sorted(seen)
+
+
+# ---------------------------------------------------------------- comparison
+
+KEY_PREDICATES = ["python.CalleeToCaller", "python.DefinitionLocation",
+                  "python.DeclarationLocation", "python.FileCall",
+                  "python.XRefsViaNameByFile", "src.File"]
 
 
 def strip_ids(v):
@@ -137,36 +224,69 @@ def strip_ids(v):
 
 
 def fact_set(db, predicate):
-    return {json.dumps(strip_ids(r["key"]), sort_keys=True)
-            for r in query(db, predicate + " _")}
+    out = set()
+    for r in query(db, predicate + " _"):
+        out.add(json.dumps(strip_ids({k: r[k] for k in ("key", "value") if k in r}),
+                           sort_keys=True))
+    return out
 
 
 def call_pairs(facts):
     out = []
     for f in sorted(facts):
-        k = json.loads(f)
+        k = json.loads(f)["key"]
         out.append(f'{k["caller"]["key"]} calls {k["callee"]["key"]}')
     return out
 
 
-def compare_with_full_index(name, db, new_dir):
+def predicates_in(*factdirs):
+    names = set()
+    for d in factdirs:
+        for f in d.glob("*.json"):
+            for b in json.loads(f.read_text()):
+                names.add(re.sub(r"\.\d+$", "", b["predicate"]))
+    return sorted(names | {"src.File"})
+
+
+FULL = {}
+
+
+def full_index(name, new_dir):
+    if name not in FULL:
+        full = f"ex/{name}_full"
+        glean("create", "--db", full)
+        write_db(full, new_dir, ROOT / "facts" / (name + "_full"))
+        glean("complete", "--db", full)
+        glean("finish", "--db", full)
+        FULL[name] = full
+    return FULL[name]
+
+
+def compare_with_full_index(name, db, new_dir, factdirs):
     """Index the changed directory from scratch and compare what the two
-    databases answer, by content (names, relations, locations), not fact ids."""
-    full = f"ex/{name}_full"
-    glean("create", "--db", full)
-    write_db(full, new_dir, ROOT / "facts" / (name + "_full"))
-    glean("complete", "--db", full)
-    glean("finish", "--db", full)
-    result = {}
-    for pred in COMPARED:
+    databases hold, by content (names, relations, locations), not fact ids,
+    for every predicate either one was given."""
+    full = full_index(name, new_dir)
+    preds = predicates_in(ROOT / "facts" / (name + "_full"), *factdirs)
+    result, differing = {}, []
+    for pred in preds:
         inc, ful = fact_set(db, pred), fact_set(full, pred)
         row = dict(incremental=len(inc), full=len(ful), same=inc == ful)
-        if pred == "python.CalleeToCaller" and inc != ful:
-            row["only_in_incremental"] = call_pairs(inc - ful)
-            row["only_in_full"] = call_pairs(ful - inc)
-        result[pred] = row
-    return result
+        if inc != ful:
+            differing.append(pred)
+            if pred == "python.CalleeToCaller":
+                row["only_in_incremental"] = call_pairs(inc - ful)
+                row["only_in_full"] = call_pairs(ful - inc)
+            else:
+                row["only_in_incremental"] = sorted(inc - ful)[:20]
+                row["only_in_full"] = sorted(ful - inc)[:20]
+        if pred in KEY_PREDICATES or inc != ful:
+            result[pred] = row
+    return dict(predicates_compared=len(preds), predicates_differing=differing,
+                same_as_full_index=not differing, rows=result)
 
+
+# ---------------------------------------------------------------- scenario
 
 def run_main_function(srcdir):
     p = subprocess.run([sys.executable, "-c", "import main; print(main.main_function())"],
@@ -203,16 +323,26 @@ def review_sentences(name, flagged, edited):
     return dict(summary=summary, sentences=rows)
 
 
-def scenario(name, base_dir, new_dir, base_db):
-    old_files = {p.name for p in base_dir.glob("*.py")}
-    new_files = {p.name for p in new_dir.glob("*.py")}
+def scenario(name, base_dir, new_dir, base_db, mode):
+    old_files, new_files = py_files(base_dir), py_files(new_dir)
     edited = sorted(f for f in old_files | new_files
                     if f not in old_files or f not in new_files
                     or (base_dir / f).read_bytes() != (new_dir / f).read_bytes())
     unedited = sorted((old_files & new_files) - set(edited))
-    db = f"ex/{name}"
-    glean("create", "--db", db, "--incremental", base_db, "--exclude", ",".join(edited))
-    counts = write_db(db, new_dir, ROOT / "facts" / name, only=set(edited) & new_files)
+    if mode == "edited_only":
+        extra = []
+    else:
+        extra = importers_of(set(edited), base_dir, new_dir,
+                             transitive=(mode == "importers"))
+    reindexed = sorted(set(edited) | set(extra))
+    excluded = sorted(set(reindexed) & old_files)
+
+    db = f"ex/{name}" if mode == "edited_only" else f"ex/{name}__{mode}"
+    factdir = ROOT / "facts" / (name if mode == "edited_only" else f"{name}__{mode}")
+    glean("create", "--db", db, "--incremental", base_db, "--exclude", ",".join(excluded))
+    indexed = set(reindexed) & new_files
+    counts = write_db(db, new_dir, factdir, only=indexed)
+    assert set(counts) == indexed, (sorted(counts), sorted(indexed))
     glean("complete", "--db", db)
     glean("finish", "--db", db)
 
@@ -223,58 +353,104 @@ def scenario(name, base_dir, new_dir, base_db):
     added = sorted(n for n in new if n not in old)
 
     # Check that the excluded units' old facts are hidden in the incremental
-    # database: each edited file should show only its newly written rows.
-    rows = {f: dict(base=len(query(base_db, 'python.DefinitionLocation { file = "%s" }' % f)),
+    # database: each re-indexed file should show only its newly written rows.
+    rows = {f: dict(parent=len(query(base_db, 'python.DefinitionLocation { file = "%s" }' % f)),
                     incremental=len(query(db, 'python.DefinitionLocation { file = "%s" }' % f)),
                     written=sum(len(b["facts"]) for b in json.loads(
-                        (ROOT / "facts" / name / (f + ".json")).read_text())
+                        (factdir / (f.replace("/", "__") + ".json")).read_text())
                         if b["predicate"].startswith("python.DefinitionLocation")))
-            for f in edited if f in new_files}
+            for f in sorted(indexed)}
 
-    everything = definitions(db, new_dir)          # the view after the change
-    flagged = []
+    after = definitions(db, new_dir)              # the view after the change
+    before = definitions(base_db, base_dir)       # the view before it
+    flagged = {}
     for callee in changed + removed:
-        for r in query(db, 'python.CalleeToCaller { callee = "%s" }' % callee):
-            caller = r["key"]["caller"]["key"]
-            where = everything.get(caller, {})
-            flagged.append(dict(changed_definition=callee, caller=caller,
-                                caller_file=where.get("file"),
-                                caller_file_edited=where.get("file") in edited))
+        for label, d in (("before", base_db), ("after", db)):
+            for r in query(d, 'python.CalleeToCaller { callee = "%s" }' % callee):
+                caller = r["key"]["caller"]["key"]
+                where = after.get(caller) or before.get(caller) or {}
+                row = flagged.setdefault((callee, caller), dict(
+                    changed_definition=callee, caller=caller,
+                    caller_file=where.get("file"),
+                    caller_file_edited=where.get("file") in edited, found_in=[]))
+                row["found_in"].append(label)
+    flagged = [flagged[k] for k in sorted(flagged)]
     reread = sorted({f["caller_file"] for f in flagged
                      if f["caller_file"] and not f["caller_file_edited"]})
-    return dict(scenario=name, base=str(base_dir.relative_to(ROOT)),
-                changed_dir=str(new_dir.relative_to(ROOT)),
+    sentences_name = name
+    return dict(scenario=name, mode=mode,
+                parent=str(base_dir.relative_to(ROOT)), parent_db=base_db,
+                changed_dir=str(new_dir.relative_to(ROOT)), db=db,
                 edited_files=edited, unedited_files=unedited,
+                reindexed_files=reindexed,
+                reindexed_but_not_edited=extra,
                 facts_written_incrementally=counts,
-                definition_rows_in_edited_files=rows,
+                definition_rows_in_reindexed_files=rows,
                 changed_definitions=changed, removed_definitions=removed,
                 added_definitions=added, callers_of_changed_or_removed=flagged,
                 unedited_files_whose_description_needs_rereading=reread,
                 unedited_files_not_flagged=[f for f in unedited if f not in reread],
                 main_function_output=dict(before=run_main_function(base_dir),
                                           after=run_main_function(new_dir)),
-                saved_sentences=review_sentences(name, flagged, edited)
+                saved_sentences=review_sentences(sentences_name, flagged, edited)
                 if name.startswith("variant_") else None,
-                incremental_compared_with_full_index=compare_with_full_index(name, db, new_dir))
+                incremental_compared_with_full_index=compare_with_full_index(
+                    name, db, new_dir, [ROOT / "facts" / "base", factdir]))
+
+
+def summary_row(r):
+    cmp = r["incremental_compared_with_full_index"]
+    c2c = cmp["rows"].get("python.CalleeToCaller", {})
+    s = r["saved_sentences"]["summary"] if r["saved_sentences"] else None
+    return dict(scenario=r["scenario"], mode=r["mode"], parent_db=r["parent_db"],
+                edited=r["edited_files"], reindexed=r["reindexed_files"],
+                same_as_full_index=cmp["same_as_full_index"],
+                predicates_differing=cmp["predicates_differing"],
+                calls_missing=c2c.get("only_in_full", []),
+                calls_extra=c2c.get("only_in_incremental", []),
+                reread=r["unedited_files_whose_description_needs_rereading"],
+                main_function=r["main_function_output"],
+                sentences_selected_and_now_wrong=s and s["selected_and_now_wrong"],
+                sentences_not_selected_but_now_wrong=s and s["not_selected_but_now_wrong"])
 
 
 def main():
     out = ROOT / "out"
     out.mkdir(exist_ok=True)
-    base_dir = ROOT / "example" / "branch_v1"
+    ex = ROOT / "example"
+    base_dir = ex / "branch_v1"
+    both = ("edited_only", "importers")
     try:
         glean("create", "--db", "ex/base")
         base_counts = write_db("ex/base", base_dir, ROOT / "facts" / "base")
         glean("complete", "--db", "ex/base")
         glean("finish", "--db", "ex/base")
-        results = [scenario(n, base_dir, ROOT / "example" / n, "ex/base")
-                   for n in ("variant_callee_only", "variant_docstring_only",
-                             "variant_reexport", "variant_caller_edited", "branch_v2")]
+        results = []
+        for n in ("variant_callee_only", "variant_docstring_only",
+                  "variant_reexport", "variant_caller_edited", "branch_v2"):
+            for mode in both:
+                results.append(scenario(n, base_dir, ex / n, "ex/base", mode))
+        # A second edit on top of the repaired re-export database: only
+        # lib.calculate_result changes, from * 3 to * 4.
+        for mode in both:
+            results.append(scenario("variant_reexport_then_x4", ex / "variant_reexport",
+                                    ex / "variant_reexport_then_x4",
+                                    "ex/variant_reexport__importers", mode))
+        # main.py reaches lib only through utils; calculate_result moves from
+        # lib.py to a new core.py, and lib re-exports it.
+        glean("create", "--db", "ex/chain_v1")
+        write_db("ex/chain_v1", ex / "chain_v1", ROOT / "facts" / "chain_v1")
+        glean("complete", "--db", "ex/chain_v1")
+        glean("finish", "--db", "ex/chain_v1")
+        for mode in ("edited_only", "direct_importers", "importers"):
+            results.append(scenario("chain_move", ex / "chain_v1", ex / "chain_move",
+                                    "ex/chain_v1", mode))
         report = dict(base_facts=base_counts,
                       predicates_dropped_for_this_glean_schema=sorted(DROPPED),
+                      summary=[summary_row(r) for r in results],
                       scenarios=results)
         (out / "report.json").write_text(json.dumps(report, indent=2))
-        print(json.dumps(report, indent=2))
+        print(json.dumps(report["summary"], indent=2))
     finally:
         (out / "glean_commands.log").write_text("\n\n".join(LOG))
 
