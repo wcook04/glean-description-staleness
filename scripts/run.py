@@ -323,7 +323,7 @@ def review_sentences(name, flagged, edited):
     return dict(summary=summary, sentences=rows)
 
 
-def scenario(name, base_dir, new_dir, base_db, mode):
+def scenario(name, base_dir, new_dir, base_db, mode, label=None):
     old_files, new_files = py_files(base_dir), py_files(new_dir)
     edited = sorted(f for f in old_files | new_files
                     if f not in old_files or f not in new_files
@@ -337,9 +337,17 @@ def scenario(name, base_dir, new_dir, base_db, mode):
     reindexed = sorted(set(edited) | set(extra))
     excluded = sorted(set(reindexed) & old_files)
 
-    db = f"ex/{name}" if mode == "edited_only" else f"ex/{name}__{mode}"
-    factdir = ROOT / "facts" / (name if mode == "edited_only" else f"{name}__{mode}")
-    glean("create", "--db", db, "--incremental", base_db, "--exclude", ",".join(excluded))
+    tag = (name if mode == "edited_only" else f"{name}__{mode}") + (f"__{label}" if label else "")
+    db, factdir = f"ex/{tag}", ROOT / "facts" / tag
+    p = glean("create", "--db", db, "--incremental", base_db, "--exclude", ",".join(excluded),
+              check=False)
+    if p.returncode != 0:
+        # Recorded, not fatal: the June 2024 Glean image aborts when a layer
+        # is created on top of another incremental layer.
+        err = [l for l in (p.stdout + p.stderr).splitlines() if "Assertion" in l or "rror" in l]
+        return dict(scenario=name, mode=mode, label=label, parent_db=base_db, db=db,
+                    edited_files=edited, reindexed_files=reindexed,
+                    glean_create_failed=dict(exit=p.returncode, lines=err[-3:]))
     indexed = set(reindexed) & new_files
     counts = write_db(db, new_dir, factdir, only=indexed)
     assert set(counts) == indexed, (sorted(counts), sorted(indexed))
@@ -378,7 +386,7 @@ def scenario(name, base_dir, new_dir, base_db, mode):
     reread = sorted({f["caller_file"] for f in flagged
                      if f["caller_file"] and not f["caller_file_edited"]})
     sentences_name = name
-    return dict(scenario=name, mode=mode,
+    return dict(scenario=name, mode=mode, label=label,
                 parent=str(base_dir.relative_to(ROOT)), parent_db=base_db,
                 changed_dir=str(new_dir.relative_to(ROOT)), db=db,
                 edited_files=edited, unedited_files=unedited,
@@ -399,10 +407,14 @@ def scenario(name, base_dir, new_dir, base_db, mode):
 
 
 def summary_row(r):
+    if "glean_create_failed" in r:
+        return dict(scenario=r["scenario"], mode=r["mode"], label=r["label"],
+                    parent_db=r["parent_db"], edited=r["edited_files"],
+                    reindexed=r["reindexed_files"], glean_create_failed=r["glean_create_failed"])
     cmp = r["incremental_compared_with_full_index"]
     c2c = cmp["rows"].get("python.CalleeToCaller", {})
     s = r["saved_sentences"]["summary"] if r["saved_sentences"] else None
-    return dict(scenario=r["scenario"], mode=r["mode"], parent_db=r["parent_db"],
+    return dict(scenario=r["scenario"], mode=r["mode"], label=r["label"], parent_db=r["parent_db"],
                 edited=r["edited_files"], reindexed=r["reindexed_files"],
                 same_as_full_index=cmp["same_as_full_index"],
                 predicates_differing=cmp["predicates_differing"],
@@ -430,12 +442,15 @@ def main():
                   "variant_reexport", "variant_caller_edited", "branch_v2"):
             for mode in both:
                 results.append(scenario(n, base_dir, ex / n, "ex/base", mode))
-        # A second edit on top of the repaired re-export database: only
-        # lib.calculate_result changes, from * 3 to * 4.
+        # A second edit after the re-export: only lib.calculate_result
+        # changes, from * 3 to * 4. First on top of the repaired incremental
+        # layer, then on top of a fresh full index of variant_reexport.
+        x4 = ("variant_reexport_then_x4", ex / "variant_reexport",
+              ex / "variant_reexport_then_x4")
+        results.append(scenario(*x4, "ex/variant_reexport__importers", "edited_only",
+                                label="on_layer"))
         for mode in both:
-            results.append(scenario("variant_reexport_then_x4", ex / "variant_reexport",
-                                    ex / "variant_reexport_then_x4",
-                                    "ex/variant_reexport__importers", mode))
+            results.append(scenario(*x4, "ex/variant_reexport_full", mode))
         # main.py reaches lib only through utils; calculate_result moves from
         # lib.py to a new core.py, and lib re-exports it.
         glean("create", "--db", "ex/chain_v1")
