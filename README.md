@@ -75,15 +75,17 @@ All numbers are from [GitHub Actions run 44513979679](https://github.com/wcook04
 
 ### Does the incremental database match a fresh index?
 
-| Change | Edited files only | Plus files importing them directly | Plus files importing them through other files |
-|---|---|---|---|
-| `variant_callee_only` | yes | | yes |
-| `variant_docstring_only` | yes | | yes |
-| `variant_reexport` | **no**: missing `main.main_function` calls `lib.calculate_result` | | yes |
-| `variant_caller_edited` | yes | | yes |
-| `branch_v2` (all three files edited) | yes | | yes |
-| `variant_reexport_then_x4` | yes | | yes |
-| `chain_move` | **no**: still has `main.main_function` calls `lib.calculate_result`, and lacks `main.main_function` calls `core.calculate_result` | **no**: the same | yes |
+| Change | Index edited files again | Also index every file that imports them |
+|---|---|---|
+| `variant_callee_only` | matches | matches |
+| `variant_docstring_only` | matches | matches |
+| `variant_reexport` | **no**: lacks the call `main_function` → `lib.calculate_result` | matches |
+| `variant_caller_edited` | matches | matches |
+| `branch_v2` (all files edited) | matches | matches |
+| `variant_reexport_then_x4` | matches | matches |
+| `chain_move` | **no**: keeps `main_function` → `lib.calculate_result`, lacks `main_function` → `core.calculate_result` | matches |
+
+For `chain_move` the script also tried indexing again only the files that import an edited file directly (adding `utils.py`). That gave the same wrong result as edited files only.
 
 In `variant_reexport`, `main.py` was not edited, so with edited files only its facts are kept from the base database. Those facts were written when `calculate_result` lived in `utils.py`. A fresh index of the new version records that `main_function` now calls `lib.calculate_result`; the incremental database does not. Indexing `main.py` again fixes it.
 
