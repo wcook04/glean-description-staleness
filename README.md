@@ -93,7 +93,7 @@ In `variant_reexport`, `main.py` was not edited, so with edited files only its f
 
 In `chain_move`, indexing `utils.py` again (it imports the edited `lib.py` directly) is not enough. `main.py`, two imports away, also has to be indexed again.
 
-Indexing every importer is more than strictly needed. In `variant_callee_only`, `main.py` is indexed again and Pyrefly writes exactly the same facts for it as before, byte for byte.
+Indexing every importer is more than strictly needed. In `variant_callee_only`, `main.py` is indexed again, and the JSON file Pyrefly writes for it is byte for byte the same file it wrote for the base database, so indexing `main.py` again changed nothing.
 
 ### Which sentences are listed for rereading?
 
