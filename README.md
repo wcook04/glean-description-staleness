@@ -4,6 +4,8 @@ When a function is edited, a sentence describing one of its callers can become f
 
 It runs on the three-file Python example from Glean's own tests. In one test a single function is edited so that it multiplies by three instead of two. Glean returns its one caller, which is in a file that was not edited. Three sentences had been saved about that caller, and one of them, "returns twice the value stored in HelperClass", is now false.
 
+Two more results come from the same example. When a function moves to another file, the incremental database matches a fresh index only if the unedited files that import an edited file, directly or through other files, are indexed again as well. And a saved sentence about a re-export becomes false without its file calling anything, so the script also selects sentences by Glean's references, which lists that sentence and no extra true one.
+
 ## What a saved description is
 
 I ask coding agents to write a few sentences about each file, under fixed headings in the file's docstring, while they still have the context from writing the code. When an agent edits a file it updates that file's sentences. It does not update the sentences in other files, and those are the ones this test is about.
@@ -104,6 +106,17 @@ With edited files only, `main.py` keeps its facts from the parent and they still
 
 `utils.py` was not edited either. Its sentence "calculate_result(value): returns value multiplied by two" is false, and was already false after the move. It is not listed: `utils.py` now only imports and re-exports the function, and an import is not a call, so the caller query does not return it.
 
+To test that without a sentence that was already wrong, `example/descriptions/sentences_after_reexport.json` has seven sentences rewritten so that every one is true for `variant_reexport`. The one for `utils.py` is "Re-exports calculate_result from lib.py, which returns value multiplied by three." After the change to `* 4`, three of them are false: one about `main_function`, the one for `utils.py`, and one in `lib.py`, which was edited.
+
+The script also selects sentences a second way. It reads `python.XRefsViaNameByFile` for the unedited files and takes every reference whose target is a changed definition. A sentence is selected when such a reference is inside the definition it is about, or when the reference is at module level (an import) and the sentence is about a name its file does not define, such as a re-export.
+
+| Selected by | Sentences in unedited files listed | Listed and now false | Listed and still true | False and not listed |
+|---|---|---|---|---|
+| Callers | 3 of 5 | 1 (`main_function` returns three times) | 2 | 1 (the `utils.py` re-export) |
+| Callers or references | 4 of 5 | 2 | 2 | 0 |
+
+The reference in `utils.py` is the import line `from lib import calculate_result`. No true sentence was added to the list. With the original sentences the two ways give the same lists for every other change.
+
 I first built this change on top of the repaired incremental database itself, as a second layer. `glean create --incremental` exited with an assertion in `glean/rts/ownership/slice.cpp` (``base.empty() || first >= base.end()``). The report keeps that run. This is the June 2024 image; I have not checked whether a newer Glean behaves differently.
 
 ### Two imports away (`chain_move`)
@@ -143,7 +156,7 @@ With importers, every case gives the same facts as the full index for all fourte
 - The example has three files and six sentences written for it. It gives no rate for how often a listed sentence is false in a real codebase, or for how many false sentences go unlisted.
 - The list of importers comes from reading `import` lines with Python's `ast` module on three or four files. A real project would take it from its build system or type checker, and would also need relative imports, search paths and modules that cannot be resolved handled. Indexing too many files again is safe; leaving one out is not.
 - With importers, every file that imports an edited file is indexed again, including after a change, such as `variant_callee_only`, where its facts would have stayed right. No smaller list is tried.
-- Only direct callers are queried, and an import or re-export is not a call. A sentence can also depend on a function several calls away, or on a constant, a type or a data format, and none of those are followed.
+- Only direct callers and direct references are queried. A sentence can also depend on a function several calls away, or on a constant, a type or a data format, and none of those are followed.
 - No program or person has examined a sentence that is not listed.
 - Sentences in an edited file are left to the agent that made the edit.
 
