@@ -75,6 +75,8 @@ All numbers are from [GitHub Actions run 44513979679](https://github.com/wcook04
 
 ### Does the incremental database match a fresh index?
 
+"Matches" means: the same version was also indexed from scratch into a separate database, the two databases were compared record by record (every call, reference, definition and name Glean stored, ignoring Glean's internal record ids), and they were identical.
+
 | Change | Index edited files again | Also index every file that imports them |
 |---|---|---|
 | `variant_callee_only` | matches | matches |
@@ -85,7 +87,7 @@ All numbers are from [GitHub Actions run 44513979679](https://github.com/wcook04
 | `variant_reexport_then_x4` | matches | matches |
 | `chain_move` | **no**: keeps `main_function` → `lib.calculate_result`, lacks `main_function` → `core.calculate_result` | matches |
 
-For `chain_move` the script also tried indexing again only the files that import an edited file directly (adding `utils.py`). That gave the same wrong result as edited files only.
+For `chain_move` the script also tried indexing again only the files that import an edited file directly, which adds `utils.py` but not `main.py`. The database still said `main_function` calls `lib.calculate_result` and still lacked the call to `core.calculate_result`, exactly as with edited files only.
 
 In `variant_reexport`, `main.py` was not edited, so with edited files only its facts are kept from the base database. Those facts were written when `calculate_result` lived in `utils.py`. A fresh index of the new version records that `main_function` now calls `lib.calculate_result`; the incremental database does not. Indexing `main.py` again fixes it.
 
